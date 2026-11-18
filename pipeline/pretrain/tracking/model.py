@@ -6,7 +6,8 @@ Encoder : transformer over hits with switchable attention
             mode='full' : global attention (the default, also for IDEA's ~3.6k hits/event)
             mode='lsh'  : HEPTv2-style locality -- serialize hits by a random-projection
                           LSH hash in (eta, phi), attend within fixed-size blocks
-                          (fresh random projections per layer = multiple views).
+                          (one projection per layer = multiple views; drawn afresh at
+                          every call in training, fixed by a seed at inference: fix_lsh).
 Decoder : M learnable track slots; L layers of [cross-attn slots<-hits, self-attn slots,
           FFN]; heads: slot-active logit + slot embedding E; assignment logits = E @ H^T.
 Aux     : per-hit background logit + normalized embedding z (InfoNCE), on encoder output.
@@ -40,6 +41,7 @@ class TrackFormer(nn.Module):
                  attn="full", block=128):
         super().__init__()
         self.attn = attn; self.block = block; self.d = d
+        self.lsh_proj = None                                  # (layers, 3, 1) once fixed
         self.inp = nn.Sequential(nn.Linear(NFEAT, d), nn.GELU(), nn.Linear(d, d))
         self.enc = nn.ModuleList([Block(d, heads) for _ in range(enc_layers)])
         # decoder
@@ -58,9 +60,15 @@ class TrackFormer(nn.Module):
         self.h_bg = nn.Linear(d, 1)                           # per-hit background logit
 
     # ---- encoder ----
-    def _lsh_order(self, etaphi):
+    def fix_lsh(self, seed=0):
+        """draw one projection per encoder layer from `seed` and keep it, so that inference is
+        reproducible (training leaves them unfixed: a fresh projection at every call)."""
+        g = torch.Generator().manual_seed(seed)
+        self.lsh_proj = torch.randn(len(self.enc), 3, 1, generator=g)
+
+    def _lsh_order(self, etaphi, layer):
         """random OR-less projection hash in (eta, phi_sin, phi_cos) -> ordering."""
-        v = torch.randn(3, 1, device=etaphi.device)
+        v = (torch.randn(3, 1) if self.lsh_proj is None else self.lsh_proj[layer]).to(etaphi.device)
         return torch.argsort((etaphi @ v).squeeze(1))
 
     def encode(self, x, etaphi):
@@ -71,8 +79,8 @@ class TrackFormer(nn.Module):
             return h[0]
         # lsh: per layer, sort by a fresh random hash, block-diagonal attention, unsort
         N = h.shape[1]; B = self.block
-        for blk in self.enc:
-            order = self._lsh_order(etaphi)
+        for i, blk in enumerate(self.enc):
+            order = self._lsh_order(etaphi, i)
             inv = torch.empty_like(order); inv[order] = torch.arange(N, device=order.device)
             pad = (-N) % B
             hp = F.pad(h[0][order], (0, 0, 0, pad)).view(-1, B, self.d)   # (nblk, B, d)
@@ -129,10 +137,13 @@ class TrackFormer(nn.Module):
         return lab.cpu().numpy()
 
 
-def load_checkpoint(path, dev):
-    """best.pt / last.pt -> TrackFormer in eval mode (architecture from the saved args)."""
+def load_checkpoint(path, dev, lsh_seed=0):
+    """best.pt / last.pt -> TrackFormer in eval mode (architecture from the saved args); a block
+    attention model gets its projections fixed from lsh_seed."""
     ck = torch.load(path, map_location=dev, weights_only=False)
     a = ck["args"]
     model = TrackFormer(d=a["dim"], slots=a["slots"], attn=a["attn"], block=a["block"]).to(dev)
     model.load_state_dict(ck["state_dict"]); model.eval()
+    if model.attn == "lsh":
+        model.fix_lsh(lsh_seed)
     return model

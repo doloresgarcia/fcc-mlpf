@@ -25,7 +25,10 @@ consumes.
 Training and evaluation need Python 3.10 or later and the packages of the repository's
 `requirements.txt`; no Key4hep environment is needed. One GPU suffices. Events with several
 thousand hits (the IDEA drift chamber) run with full attention; `--attn lsh`, attention within
-blocks of hits close in (η, φ), is the fallback if memory or step time becomes limiting.
+blocks of hits close in (η, φ), is the fallback if memory or step time becomes limiting. Block
+attention groups the hits by a random projection per encoder layer; training draws new projections
+at every step, and inference fixes them from a seed (`model.TrackFormer.fix_lsh`, applied by
+`load_checkpoint`; `eval.py run --lsh-seed`) so that the same event always gives the same tracks.
 
 ## Data and splits
 
@@ -167,6 +170,10 @@ python eval.py run --inputs '<derived>/cld_91gev/chunk_000[0-4]*.parquet' \
     --ckpt "v2=runs/t_cld_all/ep_019.pt" --ckpt "v2.1=runs/t_cld_all_idea/ep_019.pt" --outdir ev/
 python eval.py plot ev/ --label "v2=ML tracking (CLD-only training)" --match pure75 dm
 ```
+
+To compare models, `eval.py plot --diff v2` adds a lower panel to every efficiency figure with
+each finder's efficiency minus that of `v2`, per bin (the fake rate versus fitted
+parameters: the ratio to `v2`).
 
 One denominator serves every matching (2026-11-11): charged particles with pT > 0.1 GeV, at
 least four hits, 10° < θ < 170° and a particle proximity ΔMC > 0.02 rad, in two versions:

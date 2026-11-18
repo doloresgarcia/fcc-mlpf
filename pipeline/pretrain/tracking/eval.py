@@ -44,7 +44,7 @@ The ML tracks use model.TrackFormer.assign with the slot acceptance on hit evide
 
   python eval.py run --inputs '<derived>/cld_91gev/chunk_0000*.parquet' \\
       --ckpt "v2=runs/t_cld_all/ep_019.pt" --ckpt "v2.1=runs/t_cld_all_idea/ep_019.pt" --outdir ev/
-  python eval.py plot ev/ [--selection ours] [--match dm] [--label "v2=CLD only"] \\
+  python eval.py plot ev/ [--selection ours] [--match dm] [--label "v2=CLD only"] [--diff v2] \\
       [--fitted "baseline=cands_baseline.parquet" --fitted "v2=cands_v2.parquet"]
 `run` writes one <sample>.npz per sample (per-particle and per-track arrays), summary.txt and
 the default figures; `plot` remakes figures from the npz files, as
@@ -129,7 +129,7 @@ def run(args):
     from model import load_checkpoint
     dev = torch.device("cuda" if torch.cuda.is_available() else
                        "mps" if torch.backends.mps.is_available() else "cpu")
-    models = [(s.split("=", 1)[0], load_checkpoint(s.split("=", 1)[1], dev)) for s in args.ckpt]
+    models = [(s.split("=", 1)[0], load_checkpoint(s.split("=", 1)[1], dev, args.lsh_seed)) for s in args.ckpt]
     files = sorted(sum([globlib.glob(p) if any(c in p for c in "*?[") else [p] for p in args.inputs], []))
     assert files, f"no inputs match {args.inputs}"
     os.makedirs(args.outdir, exist_ok=True)
@@ -146,7 +146,7 @@ def run(args):
         has_base = "bhit_track" in t.column_names
         finders = (["baseline"] if has_base else []) + [l for l, _ in models]
         meta.setdefault(sample, dict(detector=fam, finders=finders, rescue=str(rescue), min_track_hits=min_trk,
-                                     checkpoints=[s for s in args.ckpt]))
+                                     checkpoints=[s for s in args.ckpt], lsh_seed=args.lsh_seed))
         if sample not in edges:                                  # layer bands from the first file
             tt = t.select(["thit_x", "thit_y", "thit_z", "thit_role"]).to_pydict()
             edges[sample] = layer_edges(*(np.concatenate(tt[k]).astype(float) for k in ("thit_x", "thit_y", "thit_z")),
@@ -202,7 +202,7 @@ def run(args):
     with open(os.path.join(args.outdir, "summary.txt"), "w") as f:
         f.write(txt + "\n")
     if not args.no_plot:
-        plot(argparse.Namespace(dir=args.outdir, selection=[], match=[], label=[], fitted=[], outdir=""))
+        plot(argparse.Namespace(dir=args.outdir, selection=[], match=[], label=[], fitted=[], diff="", outdir=""))
 
 
 # --------------------------------------------------------------------------- definitions
@@ -333,13 +333,24 @@ def plot(args):
                         return
                     den, items = denominator(d, sel, axis, fig_items)
                     r = den & fig_cut
-                    fig, ax = plt.subplots(figsize=(11, 8.5))
+                    if args.diff:
+                        fig, (ax, axd) = plt.subplots(2, 1, figsize=(11, 11), sharex=True,
+                                                      gridspec_kw=dict(height_ratios=(3, 1), hspace=0.05))
+                    else:
+                        fig, ax = plt.subplots(figsize=(11, 8.5))
                     ctr = np.sqrt(edges[:-1] * edges[1:]) if logx else 0.5 * (edges[:-1] + edges[1:])
-                    summ, lows = [], []
+                    summ, lows, dmax = [], [], 0.05
+                    ref = binned(x[r], d[f"p_{match}:{args.diff}"][r], edges) if args.diff else None
                     for f in finders:
                         col, mk, face = finder_style(f, finders)
                         e, lo, hi, n = binned(x[r], d[f"p_{match}:{f}"][r], edges)
                         ok = n > 0
+                        if args.diff and f != args.diff:     # difference to the reference finder, per bin
+                            err = np.sqrt((lo + hi) ** 2 + (ref[1] + ref[2]) ** 2) / 2
+                            axd.errorbar(ctr[ok], (e - ref[0])[ok], yerr=err[ok], fmt=mk, ms=5, color=col, mfc=face,
+                                         capsize=0, elinewidth=1)
+                            big = (n >= 50) & (ref[3] >= 50)
+                            dmax = max([dmax] + list(np.abs(e - ref[0])[big]))
                         ax.errorbar(ctr[ok], e[ok], yerr=[lo[ok], hi[ok]], fmt=mk, ms=5, color=col, mfc=face, capsize=0,
                                     elinewidth=1, label=labels.get(f, "Conformal tracking" if f == "baseline" else f))
                         inacc = ctr > 8 if axis == "theta" else np.ones_like(ctr, bool)   # y range: tracker acceptance
@@ -351,6 +362,14 @@ def plot(args):
                     ax.set_xlim(*(xlim or (edges[0], edges[-1]))); ax.set_ylim(ylo, ytop)
                     ax.grid(True, which="major", ls=":", color="k", lw=0.8)
                     ax.set_xlabel(xlabel); ax.set_ylabel("Tracking efficiency")
+                    if args.diff:
+                        ax.set_xlabel("")
+                        axd.axhline(0, color=finder_style(args.diff, finders)[0], lw=1)
+                        axd.grid(True, which="major", ls=":", color="k", lw=0.8)
+                        lim = np.ceil(dmax * 1.2 * 20) / 20
+                        axd.set_ylim(-lim, lim); axd.set_xlabel(xlabel); axd.set_ylabel("difference")
+                        axd.text(0.01, 0.95, "minus " + labels.get(args.diff, args.diff), transform=axd.transAxes,
+                                 va="top", fontsize="xx-small")
                     # the selection under the sample name, as in the CLD paper's figures
                     tag = ", material/decay secondaries" if sel == "secondaries" else ""
                     ax.legend(title=head + tag + "\n" + ", ".join(items), loc="best", fontsize="x-small",
@@ -402,9 +421,14 @@ def fakes_vs_fitted(args, plt, hep, axes_log, d, outdir, head, finders, finder_s
             ("fake_vs_theta", lambda t: np.minimum(np.degrees(t["fit_theta"]), 180 - np.degrees(t["fit_theta"])),
              np.arange(8, 92, 2), lambda t: t["fit_pt"] > 1, "Reconstructed track $\\theta$ [$^\\circ$] (folded)",
              f"$p_\\mathrm{{T}}$ > 1 GeV, min $N_\\mathrm{{hits}}$ = {min_trk}", False)):
-        fig, ax = plt.subplots(figsize=(10, 8.5))
+        diff = args.diff in chains
+        if diff:
+            fig, (ax, axd) = plt.subplots(2, 1, figsize=(10, 11), sharex=True,
+                                          gridspec_kw=dict(height_ratios=(3, 1), hspace=0.05))
+        else:
+            fig, ax = plt.subplots(figsize=(10, 8.5))
         ctr = np.sqrt(edges[:-1] * edges[1:]) if logx else 0.5 * (edges[:-1] + edges[1:])
-        summ = []
+        summ, rates = [], {}
         for f in [f for f in finders if f in chains]:
             t = {k: np.asarray(v) for k, v in pq.read_table(chains[f], columns=[
                 "nhits", "converged", "purity", "fit_pt", "fit_theta", "owner_completeness"]).to_pydict().items()}
@@ -415,15 +439,32 @@ def fakes_vs_fitted(args, plt, hep, axes_log, d, outdir, head, finders, finder_s
             ok = n > 0
             ax.errorbar(ctr[ok], e[ok], yerr=[lo[ok], hi[ok]], fmt=mk, ms=5, color=col, mfc=face, capsize=0, elinewidth=1,
                         label=labels.get(f, "Conformal tracking" if f == "baseline" else f))
+            rates[f] = (e, (lo + hi) / 2, (col, mk, face))
             summ.append(f"{f} {np.mean(bad[m]):.4f} (n = {int(m.sum())})")
+        if diff:                                                   # ratio to the reference finder, per bin
+            e0, s0, _ = rates[args.diff]
+            for f, (e, s_, (col, mk, face)) in rates.items():
+                if f == args.diff:
+                    continue
+                ok = (e0 > 0) & np.isfinite(e)
+                r_ = np.where(ok, e / np.where(ok, e0, 1), np.nan)
+                err = r_ * np.sqrt((s_ / np.where(e > 0, e, np.nan)) ** 2 + (s0 / np.where(ok, e0, 1)) ** 2)
+                axd.errorbar(ctr[ok], r_[ok], yerr=err[ok], fmt=mk, ms=5, color=col, mfc=face, capsize=0, elinewidth=1)
+            axd.set_yscale("log"); axd.set_ylim(0.1, 10)
+            axd.axhline(1, color=rates[args.diff][2][0], lw=1)
+            axd.grid(True, which="major", ls=":", color="k", lw=0.8); axd.set_ylabel("ratio")
+            axd.text(0.01, 0.05, "divided by " + labels.get(args.diff, args.diff), transform=axd.transAxes,
+                     va="bottom", fontsize="xx-small")
         ax.set_yscale("log"); ax.set_ylim(1e-4, 1)
         if logx:
             axes_log(ax); ax.set_xlim(0.093, 200)
         else:
             ax.set_xlim(0, 90)
         ax.grid(True, which="major", ls=":", color="k", lw=0.8)
-        ax.set_xlabel(xl); ax.set_ylabel("Fake rate")
-        ax.legend(title=head + "\n" + txt + "\nconverged Genfit fits", loc="lower left", fontsize="x-small",
+        ax.set_xlabel("" if diff else xl); ax.set_ylabel("Fake rate")
+        if diff:
+            axd.set_xlabel(xl)
+        ax.legend(title=head + "\n" + txt + "\nconverged Genfit fits", loc="best", fontsize="x-small",
                   title_fontsize="x-small", alignment="left", frameon=False)
         hep.label.exp_label(exp="CLD", text="Full Sim", data=True, loc=0,
                             rlabel=MATCH_TXT[match], ax=ax)
@@ -439,6 +480,7 @@ def main():
     r.add_argument("--ckpt", action="append", default=[], metavar="LABEL=PATH", help="repeat for several models")
     r.add_argument("--rescue", default="default", metavar="K,P_HI,FLOOR|none|default",
                    help="slot acceptance on hit evidence (model.TrackFormer.assign); default per detector")
+    r.add_argument("--lsh-seed", type=int, default=0, help="projections of block attention (--attn lsh) models")
     r.add_argument("--min-track-hits", type=int, default=0, help="pure75 / dm track minimum (0 = per detector)")
     r.add_argument("--max-events", type=int, default=0, help="0 = all")
     r.add_argument("--no-plot", action="store_true")
@@ -452,6 +494,8 @@ def main():
     p.add_argument("--label", action="append", default=[], metavar="FINDER=LEGEND")
     p.add_argument("--fitted", action="append", default=[], metavar="FINDER=CANDIDATES.parquet",
                    help="analyze_fitted.py candidate table of a finder: fake rate vs fitted pT and theta")
+    p.add_argument("--diff", default="", metavar="FINDER",
+                   help="add a lower panel: each finder's efficiency minus FINDER's (fake rate: ratio), per bin")
     p.add_argument("--outdir", default="", help="default: the run directory")
     a = ap.parse_args()
     (run if a.cmd == "run" else plot)(a)
