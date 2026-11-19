@@ -90,10 +90,27 @@ run_pf.sh -s sources.txt -w work/ttbar -m v2=<[T] checkpoint> -o runs/pf_ttbar \
 | `-m NAME=CKPT` | the [T] model whose candidates are fitted |
 | `-n` | the first `n` sorted source files (default all) |
 | `-a`, `-t` | step A in `a` parallel processes of `t` threads (for step A on the CPU) |
-| `-j` | parallel Genfit fits and shard builders |
+| `-j` | parallel Genfit fits, step-D extractions and shard builders |
+| `-b` | source files fitted per batch before their fitted files are deleted (default 200) |
+| `-k` | keep the fitted files |
 | `-g` | GPUs for the training (torchrun) |
 | `-S` | the stages to run, a subset of `chain,cache,train` |
 | after `--` | options of `train.py` |
+
+The fit writes a full copy of every event next to the fitted tracks, about 3 MB per tt̄ event,
+whereas [PF] needs only the per-track table of step D, about 7 kB per event. The chain therefore
+runs in batches: it fits a batch of files, extracts their track tables and deletes their fitted
+files, so that what stays per source file is its step-A labels and its track table, and the disk
+holds at most one batch of fitted files. A source file with a track table is not fitted again.
+With `-k` the fitted files are kept, for the fitted-level analysis of step E. The batches release
+the claims of `run_chain.sh`, so the chain of one work directory runs on one machine at a time.
+
+| per source file (ten tt̄ events) | size | kept |
+|---|---|---|
+| fitted EDM4hep file (step C) | 33 MB | no (yes with `-k`) |
+| track table (step D) | 65 kB | yes |
+| step-A labels | 12 kB | yes |
+| [PF] shard | 1.7 MB | yes |
 
 The chain and the cache need CPUs only and the training needs GPUs, so on a shared machine we
 run them separately: `-S chain,cache` first, then `-S train` once GPUs are free. The stages are
@@ -113,7 +130,9 @@ The cost is dominated by the Genfit fit. On 200 tt̄ files at 365 GeV (2,000 eve
 2026-11-19, a shared 64-core machine), the fit of one file of ten events took about three
 minutes and the 200 files 38 minutes with 24 parallel fits; step A on the CPU took 2.5 minutes
 with `-a 8 -t 4`, against about 5 s per event in a single process; step D and the cache took
-11 minutes with 24 builders. The cache holds about 0.17 MB per tt̄ event.
+11 minutes with 24 builders. For the full sample of 8,926 files (about 89,000 events) this
+extrapolates to about a day of fitting with 24 parallel fits, 15 GB of cache and 0.7 GB of track
+tables and labels.
 
 ## Training
 
@@ -149,9 +168,18 @@ active query (objectness above 0.5) if its mask probability exceeds 0.5 (0.1 for
 
 The chain has been run on 200 tt̄ files at 365 GeV (2026-11-19): 2,000 events, about 100,000
 fitted tracks (12% of the candidates fail the fit), all of which reach the calorimeter, and at
-most 246 targets in an event. In a first check on 20 events,
-99.8% of the fitted tracks have a truth particle (median purity 1.0), and all calorimeter
-energy belongs to an object; charged hadrons have a matched track in 88% of the cases, muons in
-34%, which we have not yet understood. The evaluation against Pandora (`chit_pandora` is cached
-for it), the particle-type and energy heads, and the tracks that do not reach the calorimeter
-are the next steps.
+most 246 targets in an event. Of the fitted tracks, 99.8% have a truth particle (median purity
+1.0), and all calorimeter energy belongs to an object.
+
+Charged hadrons have a matched track in 88% of the cases, muons in 41%. The muon objects are mostly
+secondaries: in 300 events, 71% of them are muons from pion and kaon decays in flight, produced
+at a median radius of 0.9 m, which keep few tracker hits of their own (the earlier hits belong to
+the parent's track), and 37% of all muon objects have fewer than four. The prompt muons have a
+track in 93% of the cases. The classical conformal tracking does not do better on the same
+objects: 34% of all muon objects, 97% of the prompt and 7% of the secondary muons (15% of those
+with at least four hits, against 29% for the [T] model). A decay in flight therefore appears as a
+calorimeter object without a track next to a track without calorimeter hits; whether the truth
+definition should join the two is open.
+
+The evaluation against Pandora (`chit_pandora` is cached for it), the particle-type and energy
+heads, and the tracks that do not reach the calorimeter are the next steps.
