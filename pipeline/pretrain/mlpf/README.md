@@ -43,12 +43,14 @@ no event number (the adapter drops events without tracker hits, so the position 
 a chunk is not its entry in the source file).
 
 The tracks are produced by steps A to D of the Genfit chain (`../tracking/genfit/README.md`):
-step A labels the tracker hits with a [T] checkpoint, steps B and C write the candidates as
+step A labels the tracker hits with a [T] checkpoint, with the slot acceptance of the [T]
+evaluation (rescue 4, 0.95, 0.05, `run_pf.sh -r`), steps B and C write the candidates as
 `MLTracks` and fit them, and step D extracts one row per converged fit. `data.py` runs step D
 itself when its output is missing. The k-th candidate of an event is the k-th slot of the [T]
 labels with at least three hits (`write_mltracks.py`), so every fitted track maps back to its
-tracker hits; its truth particle is the most frequent MC particle among those hits, kept if it
-holds more than half of them.
+tracker hits; its truth particle is the one matched by double majority, as everywhere in [T]
+(`../tracking/metrics.py`): more than half of the track's hits belong to the particle, and more
+than half of the particle's tracker hits are on the track.
 
 Truth objects follow [C] (`../clustering/DESIGN.md`): the object of a calorimeter hit is the
 calorimeter mother of its largest-fraction MC particle, and the object of a track is the
@@ -90,6 +92,7 @@ run_pf.sh -s sources.txt -w work/ttbar -m v2=<[T] checkpoint> -o runs/pf_ttbar \
 | `-m NAME=CKPT` | the [T] model whose candidates are fitted |
 | `-n` | the first `n` sorted source files (default all) |
 | `-a`, `-t` | step A in `a` parallel processes of `t` threads (for step A on the CPU) |
+| `-r K,P,F` | the [T] slot acceptance with rescue (default 4,0.95,0.05, the CLD default of `../tracking/eval.py`); existing labels are reused, so delete `chain/labels_<N>/` after changing it |
 | `-j` | parallel Genfit fits, step-D extractions and shard builders |
 | `-b` | source files fitted per batch before their fitted files are deleted (default 200) |
 | `-k` | keep the fitted files |
@@ -170,7 +173,10 @@ active query (objectness above 0.5) if its mask probability exceeds 0.5 (0.1 for
 The chain has been run on 200 tt̄ files at 365 GeV (2026-11-19): 2,000 events, about 100,000
 fitted tracks (12% of the candidates fail the fit), all of which reach the calorimeter, and at
 most 246 targets in an event. Of the fitted tracks, 99.8% have a truth particle (median purity
-1.0), and all calorimeter energy belongs to an object.
+1.0), and all calorimeter energy belongs to an object. The numbers in this section were measured
+with the earlier track truth (the majority particle, without the completeness condition) and
+with the [T] slot acceptance without rescue; they are to be remeasured with the current
+definitions.
 
 Charged hadrons have a matched track in 88% of the cases, muons in 41%. The muon objects are mostly
 secondaries: in 300 events, 71% of them are muons from pion and kaon decays in flight, produced

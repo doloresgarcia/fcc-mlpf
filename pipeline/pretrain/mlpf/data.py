@@ -14,9 +14,10 @@ source file, so the events line up by their source entry number:
 
 The k-th track of an event in MLTracks, and hence in GenfitTracks, is the k-th slot id of
 np.unique(pred[pred >= 0]) holding at least MIN_TRACK_HITS rows (write_mltracks.py), so every
-fitted track maps back to its tracker hits. Its truth particle is the most frequent MC particle
-of those hits, kept if it holds more than half of them, and its object is that particle's
-calorimeter mother, as for the calorimeter hits.
+fitted track maps back to its tracker hits. Its truth particle is the MC particle matched by
+double majority, as everywhere in [T] (tracking/metrics.py dm_match: more than half of the
+track's hits are the particle's, and more than half of the particle's tracker hits are on the
+track), and its object is that particle's calorimeter mother, as for the calorimeter hits.
 
 Truth objects follow [C] (../clustering/DESIGN.md): the object of a calorimeter hit is
 mc_calomother[chit_mc], and the object of a track is the calorimeter mother of its truth
@@ -79,6 +80,8 @@ MIN_DEP = _cdata.MIN_DEP
 CLASSES = _cdata.CLASSES
 object_class = _cdata.object_class
 C_LIGHT = _tmetrics.C_LIGHT
+dm_match = _tmetrics.dm_match
+track_sets = _tmetrics.track_sets
 
 MIN_TRACK_HITS = 3                             # write_mltracks.py --min-hits default
 NTYPE = 5
@@ -98,17 +101,21 @@ def track_rows(pred, min_hits=MIN_TRACK_HITS):
     return out
 
 
-def track_truth(rows, thit_mc):
-    """-> (MC row of the track's truth particle or -1, purity): the most frequent particle
-    among the track's hits, kept if it holds more than half of them."""
-    mc = thit_mc[rows]
-    mc = mc[mc >= 0]
-    if len(mc) == 0:
-        return -1, 0.0
-    vals, cnt = np.unique(mc, return_counts=True)
-    j = int(np.argmax(cnt))
-    purity = cnt[j] / len(rows)
-    return (int(vals[j]) if purity > 0.5 else -1), float(purity)
+def track_truth(tracks, thit_mc):
+    """Hit rows of each track -> (MC row of its double-majority particle or -1, purity), per
+    track; the purity is the fraction of the track's hits from its most frequent particle."""
+    _, pairs = dm_match({j: set(rows.tolist()) for j, rows in enumerate(tracks)},
+                        track_sets(thit_mc, 1))
+    trk_mc = np.full(len(tracks), -1, np.int64)
+    for j, mc in pairs:
+        trk_mc[j] = mc
+    purity = np.zeros(len(tracks), np.float32)
+    for j, rows in enumerate(tracks):
+        mc = thit_mc[rows]
+        mc = mc[mc >= 0]
+        if len(mc):
+            purity[j] = np.unique(mc, return_counts=True)[1].max() / len(rows)
+    return trk_mc, purity
 
 
 def track_momentum(omega, tanl, b_tesla):
@@ -146,9 +153,7 @@ def build_event(e, pred, trk, b_tesla, min_hits=MIN_TRACK_HITS):
     if len(k_idx) and k_idx.max() >= len(rows_list):
         raise ValueError(f"event {e['event']}: fitted track index {k_idx.max()} but only "
                          f"{len(rows_list)} MLTracks entries (labels and fit out of step?)")
-    truth = [track_truth(rows_list[k], thit_mc) for k in k_idx]
-    trk_mc = np.array([t[0] for t in truth], np.int64)
-    trk_pur = np.array([t[1] for t in truth], np.float32)
+    trk_mc, trk_pur = track_truth([rows_list[k] for k in k_idx], thit_mc)
     obj_trk_mc = np.where(trk_mc >= 0, calomother[np.maximum(trk_mc, 0)], -1)
     txyz = np.stack([trk["calo_x"][has_calo], trk["calo_y"][has_calo],
                      trk["calo_z"][has_calo]], 1).astype(np.float32) / 1000.0
