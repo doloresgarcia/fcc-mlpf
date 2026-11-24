@@ -121,7 +121,8 @@ class PFLoss:
 
 
 @torch.no_grad()
-def assign(per_layer, batch, mask_threshold=0.5, cls_threshold=0.5, track_mask_threshold=0.1):
+def assign(per_layer, batch, mask_threshold=0.5, cls_threshold=0.5, track_mask_threshold=0.1,
+           valid_argmax=False):
     """Final-layer readout -> list of per-node labels (0 = unassigned, 1..K = particle)."""
     ml, cl = per_layer[-1]["mask_logits"], per_layer[-1]["cls_logits"]
     out = []
@@ -129,7 +130,8 @@ def assign(per_layer, batch, mask_threshold=0.5, cls_threshold=0.5, track_mask_t
         out.append(labels_from_masks(ml[b, :, :n], cl[b].view(-1), mask_threshold, cls_threshold,
                                      hit_type=batch["hit_subsystem"][b, :n],
                                      track_mask_threshold=track_mask_threshold,
-                                     track_hit_type=TYPE_TRACK).cpu().numpy())
+                                     track_hit_type=TYPE_TRACK,
+                                     valid_argmax=valid_argmax).cpu().numpy())
     return out
 
 

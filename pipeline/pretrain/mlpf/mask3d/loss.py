@@ -509,7 +509,6 @@ def mask3d_loss(
             sub_kvs = [key_valid]
     else:
         sub_kvs = [key_valid]
-    n_subs = len(sub_kvs)
 
     # Defensive logit clamp: bf16/fp16 + bidirectional cross-attn can spike
     # logits to ±inf on rare batches before grad-clip catches the gradient.

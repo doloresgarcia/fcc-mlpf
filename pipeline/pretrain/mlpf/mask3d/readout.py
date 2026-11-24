@@ -1,8 +1,7 @@
 """Per-hit readout of the Mask3D model: hit -> cluster labels from the mask and objectness
-logits. Extracted verbatim from mlpf src/layers/inference_oc_mask3d.py (labels_from_masks), whose
-other contents (dgl/pandas evaluation frames) are not needed here."""
-import os
-
+logits. Extracted from mlpf src/layers/inference_oc_mask3d.py (labels_from_masks), whose other
+contents (dgl/pandas evaluation frames) are not needed here; its two environment-variable
+switches became the argument valid_argmax and were dropped (a debug printout)."""
 import torch
 
 
@@ -15,6 +14,7 @@ def labels_from_masks(
     track_mask_threshold=None,
     track_hit_type=1,
     force_track_assignment=False,
+    valid_argmax=False,
 ):
     """Convert per-(query, hit) mask logits into per-hit cluster labels.
 
@@ -34,6 +34,8 @@ def labels_from_masks(
             validity). Each tracker hit IS a particle, so we never want to
             drop one to "unassigned" just because the model's confidence on
             its best match happened to fall below the calo threshold.
+        valid_argmax: if True, only valid queries compete in the per-hit
+            argmax (Mask2Former semantics; see below).
 
     Returns:
         labels: (N_k,) int64. 0 = noise / unassigned, 1..K = cluster id
@@ -44,8 +46,7 @@ def labels_from_masks(
 
     probs = mask_logits.sigmoid()                              # (N_q, N_k)
     valid_q = cls_logits.view(-1).sigmoid() >= cls_threshold   # (N_q,)
-    import os
-    if os.environ.get("M3D_VALID_ARGMAX") and valid_q.any():
+    if valid_argmax and valid_q.any():
         # Mask2Former semantics: only valid (objectness>=thr) queries compete
         # in the per-hit argmax. Without this, unmatched "collector" queries
         # (e.g. trained into existence by a max-over-ALL-queries recall loss)
@@ -53,16 +54,6 @@ def labels_from_masks(
         # to noise.
         probs = probs.masked_fill(~valid_q.view(-1, 1), 0.0)
     max_prob, argmax_q = probs.max(dim=0)                      # (N_k,)
-    if os.environ.get("M3D_DEBUG_LABELS"):
-        cs = cls_logits.view(-1).sigmoid()
-        print(
-            "[labels_from_masks] N_q=%d valid_q=%d cls_sig[min/med/max]=%.3f/%.3f/%.3f "
-            "| N_k=%d maxprob[q10/med/q90]=%.3f/%.3f/%.3f frac>=thr(%.2f)=%.3f"
-            % (len(cs), int(valid_q.sum()), cs.min(), cs.median(), cs.max(),
-               len(max_prob), max_prob.quantile(0.1), max_prob.median(),
-               max_prob.quantile(0.9), float(mask_threshold),
-               (max_prob >= mask_threshold).float().mean())
-        )
 
     if hit_type is not None and track_mask_threshold is not None:
         # Per-hit threshold: tracker hits (hit_type==1) get the looser cut.
