@@ -200,20 +200,30 @@ def chain_paths(src, work, model):
 
 
 def ensure_tracks(fitted, tracks, model):
-    """Run step D (states_to_parquet.py) for one fitted file if its track table is missing."""
+    """Run step D (states_to_parquet.py) for one fitted file if its track table is missing.
+    -> False if there is no track table and none can be made (no fitted file, or step D fails)."""
     if os.path.exists(tracks):
-        return
+        return True
+    if not os.path.exists(fitted):
+        return False
     os.makedirs(os.path.dirname(tracks), exist_ok=True)
     tmp = f"{tracks}.tmp{os.getpid()}.parquet"
-    subprocess.run([sys.executable, os.path.join(GENFIT, "states_to_parquet.py"), "--input", fitted,
-                    "--tracks", f"GenfitTracks_{model}", "--output", tmp], check=True)
+    r = subprocess.run([sys.executable, os.path.join(GENFIT, "states_to_parquet.py"), "--input", fitted,
+                        "--tracks", f"GenfitTracks_{model}", "--output", tmp], check=False)
+    if r.returncode != 0:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return False
     os.replace(tmp, tracks)
+    return True
 
 
 def load_source(src, work, model, detector="cld"):
-    """-> list of [PF] event dicts of one source file (see the module docstring)."""
+    """-> list of [PF] event dicts of one source file (see the module docstring), or None if the
+    chain has no step-A labels or no track table for it (step A or the fit failed)."""
     labels, fitted, tracks = chain_paths(src, work, model)
-    ensure_tracks(fitted, tracks, model)
+    if not os.path.exists(labels) or not ensure_tracks(fitted, tracks, model):
+        return None
     b_tesla = detectors.get(detector)["b_tesla"]
     lab = np.load(labels)
     t = pq.read_table(tracks)
@@ -268,6 +278,9 @@ def _build_one(src, work, model, shard_dir):
     if os.path.exists(sp) and os.path.exists(mp):
         return
     evs = load_source(src, work, model)
+    if evs is None:                             # no shard, so a later fit of this file is picked up
+        print(f"  skip {key}: no step-A labels or fitted tracks (fit failed?)", flush=True)
+        return
     buf = io.BytesIO()
     torch.save([_compact(e) for e in evs], buf)
     tmp = f"{sp}.tmp{os.getpid()}"
@@ -284,8 +297,9 @@ def _build_one(src, work, model, shard_dir):
 
 
 def build_shards(sources, work, model, shard_dir, jobs=1):
-    """One shard per source file (resumable, skip-if-exists, `jobs` parallel builders).
-    -> (shard_paths, meta) with meta = {n_events, kmax, nnode_max, tracks, tracks_nocalo}."""
+    """One shard per source file (resumable, skip-if-exists, `jobs` parallel builders); source
+    files without fitted tracks are skipped. -> (shard_paths, meta) with meta = {n_events, kmax,
+    nnode_max, tracks, tracks_nocalo, skipped}."""
     os.makedirs(shard_dir, exist_ok=True)
     todo = [s for s in sources if not all(os.path.exists(p) for p in _shard_paths(s, shard_dir)[1:])]
     if todo and jobs > 1:
@@ -294,10 +308,14 @@ def build_shards(sources, work, model, shard_dir, jobs=1):
         with mp_.Pool(jobs) as pool:
             pool.map(functools.partial(_build_one, work=work, model=model, shard_dir=shard_dir),
                      todo, chunksize=1)
-    paths, meta = [], {"n_events": 0, "kmax": 0, "nnode_max": 0, "tracks": 0, "tracks_nocalo": 0}
+    paths, meta = [], {"n_events": 0, "kmax": 0, "nnode_max": 0, "tracks": 0, "tracks_nocalo": 0,
+                       "skipped": 0}
     for s in sources:
         _build_one(s, work, model, shard_dir)
         _, sp, mp = _shard_paths(s, shard_dir)
+        if not os.path.exists(mp):
+            meta["skipped"] += 1
+            continue
         with open(mp) as f:
             m = json.load(f)
         paths.append(sp)

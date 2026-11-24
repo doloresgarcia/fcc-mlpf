@@ -117,6 +117,7 @@ def main():
     train_sh, meta = build_shards(srcs[n_test:], args.chain_work, args.model, args.shard_cache)
     log(f"train: {len(train_sh)} files, {meta['n_events']} events (max {meta['kmax']} objects, "
         f"{meta['nnode_max']} nodes); held-out: {len(test_sh)} files, {meta_t['n_events']} events; "
+        f"{meta['skipped'] + meta_t.get('skipped', 0)} files without fitted tracks skipped; "
         f"{world} process(es) x {args.batch_size} events per step")
 
     cfg = {k: getattr(args, k) for k in MODEL_DEFAULTS}

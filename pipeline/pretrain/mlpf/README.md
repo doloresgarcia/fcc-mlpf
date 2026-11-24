@@ -102,7 +102,8 @@ whereas [PF] needs only the per-track table of step D, about 7 kB per event. The
 runs in batches: it fits a batch of files, extracts their track tables and deletes their fitted
 files, so that what stays per source file is its step-A labels and its track table, and the disk
 holds at most one batch of fitted files. A source file with a track table is not fitted again.
-With `-k` the fitted files are kept, for the fitted-level analysis of step E. The batches release
+A source file whose fit failed has no track table: the cache skips it, says so, and builds its
+shard once a rerun of the chain has fitted it. With `-k` the fitted files are kept, for the fitted-level analysis of step E. The batches release
 the claims of `run_chain.sh`, so the chain of one work directory runs on one machine at a time.
 
 | per source file (ten tt̄ events) | size | kept |
